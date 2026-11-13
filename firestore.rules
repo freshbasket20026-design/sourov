@@ -1,0 +1,147 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidPublicProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.uid is string && data.uid == userId && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateInfo(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'createdAt', 'updatedAt'])
+        && data.uid is string && data.uid == userId && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidConversation(data, userId, convId) {
+      return data.keys().hasAll(['id', 'ownerId', 'title', 'model', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'title', 'model', 'createdAt', 'updatedAt'])
+        && data.id is string && data.id == convId && isValidId(data.id)
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && data.model is string && data.model.size() >= 1 && data.model.size() <= 64
+        && data.model in ['gemini-3.1-flash-lite']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMessage(data, userId, convId, msgId) {
+      return data.keys().hasAll(['id', 'ownerId', 'conversationId', 'role', 'content', 'createdAt'])
+        && data.keys().hasOnly(['id', 'ownerId', 'conversationId', 'role', 'content', 'model', 'totalTokens', 'createdAt'])
+        && data.id is string && data.id == msgId && isValidId(data.id)
+        && data.ownerId is string && data.ownerId == userId && isValidId(data.ownerId)
+        && data.conversationId is string && data.conversationId == convId && isValidId(data.conversationId)
+        && data.role is string && data.role.size() >= 1 && data.role.size() <= 16 && data.role in ['user', 'assistant']
+        && data.content is string && data.content.size() <= 40000
+        && (!('model' in data) || (data.model is string && data.model.size() >= 1 && data.model.size() <= 64))
+        && (!('totalTokens' in data) || (data.totalTokens is int && data.totalTokens >= 0))
+        && data.createdAt is timestamp;
+    }
+
+    match /users/{userId}/public/{docId} {
+      allow get: if isValidId(userId) && isValidId(docId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId) && docId == 'profile' && isOwner(userId)
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && docId == 'profile' && isOwner(userId)
+        && isValidPublicProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /users/{userId}/private/{docId} {
+      allow get: if isValidId(userId) && isValidId(docId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId) && docId == 'info' && isOwner(userId)
+        && isValidPrivateInfo(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && docId == 'info' && isOwner(userId)
+        && isValidPrivateInfo(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    match /users/{userId}/conversations/{conversationId} {
+      allow get: if isValidId(userId) && isValidId(conversationId) && isOwner(userId);
+      allow list: if isValidId(userId) && isOwner(userId)
+        && resource.data.ownerId == request.auth.uid;
+      allow create: if isValidId(userId) && isValidId(conversationId) && isOwner(userId)
+        && isValidConversation(incoming(), userId, conversationId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isValidId(conversationId) && isOwner(userId)
+        && isValidConversation(incoming(), userId, conversationId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'model', 'updatedAt']);
+      allow delete: if isValidId(userId) && isValidId(conversationId) && isOwner(userId);
+    }
+
+    match /users/{userId}/conversations/{conversationId}/messages/{messageId} {
+      allow get: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId) && isOwner(userId);
+      allow list: if isValidId(userId) && isValidId(conversationId) && isOwner(userId)
+        && resource.data.ownerId == request.auth.uid;
+      allow create: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId) && isOwner(userId)
+        && isValidMessage(incoming(), userId, conversationId, messageId)
+        && incoming().createdAt == request.time
+        && exists(/databases/$(database)/documents/users/$(userId)/conversations/$(conversationId))
+        && get(/databases/$(database)/documents/users/$(userId)/conversations/$(conversationId)).data.ownerId == request.auth.uid;
+      allow update: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId) && isOwner(userId)
+        && isValidMessage(incoming(), userId, conversationId, messageId)
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().conversationId == existing().conversationId
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['content', 'model', 'totalTokens']);
+      allow delete: if isValidId(userId) && isValidId(conversationId) && isValidId(messageId) && isOwner(userId);
+    }
+  }
+}
